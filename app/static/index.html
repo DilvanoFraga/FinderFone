@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>Finder ARX</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; background:#f7f9fb; }
+    .container { max-width: 760px; margin: 0 auto; }
+    .center { text-align: center; }
+    h1 { font-size: 1.6rem; margin-bottom: .5rem; }
+    form { display: grid; gap: .75rem; max-width: 520px; margin: 0 auto; background:#fff; padding:1rem 1.25rem; border-radius:8px; box-shadow:0 2px 6px rgba(0,0,0,.08); }
+    label { display: flex; flex-direction: column; font-size:.85rem; font-weight:600; gap: .35rem; }
+    input[type=text], input[type=date] { padding: .55rem .6rem; font-size: .95rem; border:1px solid #cfd7df; border-radius:4px; }
+    input:focus { outline:2px solid #4a90e2; border-color:#4a90e2; }
+    button { background:#1565c0; color:#fff; padding:.7rem 1.1rem; border:none; font-size:.95rem; border-radius:6px; cursor:pointer; font-weight:600; }
+    button:hover { background:#0d47a1; }
+    .results { margin-top:1.5rem; }
+    table { border-collapse: collapse; width:100%; font-size:.85rem; }
+    th, td { padding: .5rem .6rem; text-align:left; border-bottom:1px solid #e2e6ea; }
+    th { background:#eef3f7; }
+    .path { font-family: monospace; }
+    .empty { margin-top:1rem; font-style:italic; color:#666; }
+    .pager { display:flex; align-items:center; gap:.5rem; justify-content:center; margin:.75rem 0 0.25rem; }
+    .muted { color:#666; font-size:.85rem; }
+    .copy { background:#455a64; }
+    .copy:hover { background:#263238; }
+    .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 24px; background: #323232; color:#fff; padding:.6rem .9rem; border-radius:8px; font-size:.85rem; opacity:0; transition: opacity .2s ease; }
+    .toast.show { opacity: 1; }
+    .actions { display:flex; justify-content:center; gap:.75rem; margin:.75rem 0; }
+    footer { margin-top:2.5rem; font-size:.7rem; color:#888; }
+  </style>
+</head>
+<body>
+  <div class="container">
+  <h1 class="center">Finder ARX</h1>
+  <p class="center">Busque arquivos por número. Opcionalmente filtre por mês (<code>YYYY-MM</code>) ou intervalo de datas. Deixe mês vazio para usar <em>start/end</em>.</p>
+  <form id="searchForm">
+    <label>Número
+      <input required name="numero" type="text" placeholder="Ex: 61993427387" />
+    </label>
+    <label>Mês (YYYY-MM)
+      <input name="month" type="text" pattern="\d{4}-\d{2}" placeholder="2025-08" />
+    </label>
+    <label>Início (YYYY-MM-DD)
+      <input name="start" type="date" />
+    </label>
+    <label>Fim (YYYY-MM-DD)
+      <input name="end" type="date" />
+    </label>
+    <label>Limite resultados
+      <input name="limit" type="text" value="200" />
+    </label>
+    <button type="submit">Buscar</button>
+  </form>
+  <div class="results" id="results"></div>
+  <footer class="center">© Finder ARX – simples interface HTML</footer>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script>
+const form = document.getElementById('searchForm');
+const resultsDiv = document.getElementById('results');
+const toast = document.getElementById('toast');
+
+let BASE_PATH = null;
+let allItems = [];
+let page = 1;
+let pageSize = 20;
+
+function showToast(msg) {
+  toast.textContent = msg;
+  toast.classList.add('show');
+  setTimeout(() => toast.classList.remove('show'), 1600);
+}
+
+function formatBytes(n) {
+  if (n === 0) return '0 B';
+  const k = 1024; const sizes = ['B','KB','MB','GB','TB'];
+  const i = Math.floor(Math.log(n)/Math.log(k));
+  return (n/Math.pow(k,i)).toFixed(i ? 1 : 0) + ' ' + sizes[i];
+}
+
+function windowsPath(rel) {
+  const r = rel.replace(/\//g, '\\');
+  if (!BASE_PATH) return r;
+  let base = BASE_PATH;
+  // garantir barra entre base e rel
+  if (!base.endsWith('\\')) base += '\\';
+  return base + r;
+}
+
+function render() {
+  if (!allItems.length) { resultsDiv.innerHTML = '<p class="empty">Nenhum resultado.</p>'; return; }
+  const total = allItems.length;
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  if (page > pages) page = pages;
+  const start = (page - 1) * pageSize;
+  const slice = allItems.slice(start, start + pageSize);
+
+  const rows = slice.map(it => `
+    <tr>
+      <td>${it.name}</td>
+      <td class="path">${it.path}</td>
+      <td>${formatBytes(it.size)}</td>
+      <td>${it.modified}</td>
+      <td>
+        <button class="saveas" data-name="${encodeURIComponent(it.name)}" data-path="${encodeURIComponent(it.path)}" type="button">Salvar como…</button>
+        <button class="copy" data-path="${encodeURIComponent(it.path)}" type="button">Copiar caminho</button>
+      </td>
+    </tr>`).join('');
+
+  const bulkSection = `<div class="actions">
+      <button id="zipAll" type="button">Salvar tudo (.zip)</button>
+      <div id="zipProgress" style="flex:1;max-width:240px;display:none;">
+        <div style="background:#eef3f7;border:1px solid #cfd7df;border-radius:6px;overflow:hidden;">
+          <div id="zipBar" style="height:14px;width:0;background:#1565c0;transition:width .15s;"></div>
+        </div>
+        <small id="zipPct" class="muted" style="display:block;text-align:center;margin-top:4px;"></small>
+      </div>
+    </div>`;
+  resultsDiv.innerHTML = `
+    <div class="pager">
+      <button id="prevBtn" ${page===1?'disabled':''}>◀</button>
+      <span class="muted">Página ${page} de ${pages}</span>
+      <button id="nextBtn" ${page===pages?'disabled':''}>▶</button>
+      <span class="muted">• Itens por página</span>
+      <select id="pageSizeSel">
+        ${[10,20,50,100].map(n=>`<option value="${n}" ${n===pageSize?'selected':''}>${n}</option>`).join('')}
+      </select>
+      <span class="muted">• Total: ${total}</span>
+    </div>
+    ${bulkSection}
+    <table>
+      <thead><tr><th>Nome</th><th>Caminho</th><th>Tamanho</th><th>Modificado</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+
+  document.getElementById('prevBtn').onclick = () => { if (page>1){ page--; render(); } };
+  document.getElementById('nextBtn').onclick = () => { const pages=Math.ceil(allItems.length/pageSize); if (page<pages){ page++; render(); } };
+  document.getElementById('pageSizeSel').onchange = (e) => { pageSize = parseInt(e.target.value,10) || 20; page = 1; render(); };
+
+  resultsDiv.querySelectorAll('button.copy').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const rel = decodeURIComponent(btn.dataset.path);
+      const full = windowsPath(rel);
+      navigator.clipboard.writeText(full).then(()=>showToast('Caminho copiado')).catch(()=>showToast('Não foi possível copiar'));
+    });
+  });
+
+  // Salvar como com File System Access API (Edge/Chrome) e fallback para link normal
+  resultsDiv.querySelectorAll('button.saveas').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const rel = decodeURIComponent(btn.dataset.path);
+      const name = decodeURIComponent(btn.dataset.name);
+      try {
+        if (!window.showSaveFilePicker) { showToast('Sem suporte – use ZIP'); return; }
+        const handle = await window.showSaveFilePicker({ suggestedName: name });
+        const writable = await handle.createWritable();
+        const resp = await fetch('/download?path=' + encodeURIComponent(rel));
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        if (resp.body && resp.body.getReader) {
+          const reader = resp.body.getReader();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            await writable.write(value);
+          }
+          await writable.close();
+        } else {
+          const blob = await resp.blob();
+          await writable.write(blob);
+          await writable.close();
+        }
+        showToast('Arquivo salvo');
+      } catch (err) {
+        showToast('Operação cancelada ou falhou');
+      }
+    });
+  });
+
+  const zipBtn = document.getElementById('zipAll');
+  const zipProgress = document.getElementById('zipProgress');
+  const zipBar = document.getElementById('zipBar');
+  const zipPct = document.getElementById('zipPct');
+  if (zipBtn) {
+    zipBtn.addEventListener('click', async () => {
+      if (!allItems.length) { showToast('Sem itens'); return; }
+      try {
+        // Nome automático: apenas o número informado (sem prefixo ou mês)
+        const numeroInput = form.querySelector('input[name="numero"]').value.trim();
+        const baseName = numeroInput ? numeroInput.replace(/\D/g,'') : 'arquivos';
+        const fileName = `${baseName}.zip`;
+
+        zipProgress.style.display = 'block';
+        zipBar.style.width = '0';
+        zipPct.textContent = 'Preparando...';
+
+        const resp = await fetch('/download-zip', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths: allItems.map(i=>i.path), zip_name: fileName })
+        });
+        if (!resp.ok) { showToast('Falha ZIP'); zipProgress.style.display='none'; return; }
+
+        const totalStr = resp.headers.get('Content-Length');
+        const total = totalStr ? parseInt(totalStr,10) : 0;
+        const reader = resp.body.getReader();
+        let received = 0;
+
+        if (window.showSaveFilePicker) {
+          try {
+            const handle = await window.showSaveFilePicker({ suggestedName: fileName });
+            const writable = await handle.createWritable();
+            while (true) {
+              const {done, value} = await reader.read();
+              if (done) break;
+              received += value.length;
+              if (total) {
+                const pct = Math.round((received/total)*100);
+                zipBar.style.width = pct + '%';
+                zipPct.textContent = pct + '%';
+              } else {
+                zipPct.textContent = formatBytes(received);
+              }
+              await writable.write(value);
+            }
+            await writable.close();
+            showToast('ZIP salvo');
+            zipProgress.style.display='none';
+            return;
+          } catch {}
+        }
+        // Fallback: acumula no browser e baixa
+        const chunks = [];
+        while (true) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          received += value.length;
+          if (total) {
+            const pct = Math.round((received/total)*100);
+            zipBar.style.width = pct + '%';
+            zipPct.textContent = pct + '%';
+          } else {
+            zipPct.textContent = formatBytes(received);
+          }
+        }
+        zipBar.style.width = '100%';
+        zipPct.textContent = '100%';
+        const blob = new Blob(chunks, { type: 'application/zip' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+        showToast('ZIP baixado');
+        zipProgress.style.display='none';
+      } catch (err) {
+        showToast('Erro ao gerar ZIP');
+        zipProgress.style.display='none';
+      }
+    });
+  }
+}
+
+async function ensureBase() {
+  if (BASE_PATH) return BASE_PATH;
+  try {
+    const r = await fetch('/health');
+    if (r.ok) { BASE_PATH = (await r.json()).base || null; }
+  } catch {}
+  return BASE_PATH;
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  resultsDiv.innerHTML = '<p>Buscando...</p>';
+  const fd = new FormData(form);
+  const params = new URLSearchParams();
+  for (const [k,v] of fd.entries()) {
+    if (v && v.trim() !== '') params.append(k, v.trim());
+  }
+  if (!params.get('numero')) { resultsDiv.innerHTML = '<p class="empty">Número é obrigatório.</p>'; return; }
+  try {
+    await ensureBase();
+    const resp = await fetch('/search?' + params.toString());
+    if (!resp.ok) { resultsDiv.innerHTML = '<p class="empty">Erro: ' + resp.status + '</p>'; return; }
+    const data = await resp.json();
+    allItems = data.items || [];
+    page = 1;
+    render();
+  } catch (err) {
+    resultsDiv.innerHTML = '<p class="empty">Falha na requisição.</p>';
+  }
+});
+</script>
+</body>
+</html>
